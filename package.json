@@ -1,0 +1,27 @@
+{
+  "name": "kidconnect-",
+  "version": "1.0.0",
+  "description": "Trabalho Tópicos XIII",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clararachelli/KidConnect-.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/clararachelli/KidConnect-/issues"
+  },
+  "homepage": "https://github.com/clararachelli/KidConnect-#readme",
+  "dependencies": {
+    "paho-mqtt": "^1.1.0",
+    "readline-sync": "^1.4.10"
+  },
+  "devDependencies": {
+    "@types/paho-mqtt": "^1.0.10"
+  }
+}
