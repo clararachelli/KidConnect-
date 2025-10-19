@@ -1,68 +1,162 @@
 const Paho = require("paho-mqtt");
 const readline = require("readline");
+const ever = true;
 
-const userId = readline.question("Digite seu ID de usuário: ");
-const mosquitto = "ws://localhost:8083/mqtt";
-const client = new Paho.Client(mosquitto, String(userId));
-
-const TOPIC_USERS = "USERS";
-const TOPIC_GRUPS = "GROUPS";
-const ID_Control = `${userId}_Control`;
-
-client.onConnectionLost = (resp) => {
-    // acredito que a atualizacao do offline possa ser feita aqui caso o terminal seja fechado sem ctrl c
-};
-
-client.onMessageArrived = (msg) => {
-    const data = JSON.parse(msg.payloadString);
-
-    if (msg.destinationName === TOPIC_USERS) {
-        try {
-            console.log(`${data.user} está ${data.status}`);
-        } catch {
-            console.log("Mensagem inválida:", msg.payloadString);
-        }
-    }
-
-    if (msg.destinationName === ID_Control) {
-        console.log(`Solitacao de mensagem recebida`);
-    }
-
-};
-
-client.connect({
-    onSuccess: () => {
-        console.log(`Conectado como ${userId}`);
-        client.subscribe(TOPIC_USERS);
-        client.subscribe(ID_Control);
-
-        publish(TOPIC_USERS, { user: userId, status: "online" });
-
-        process.on("SIGINT", () => {
-            publish(TOPIC_USERS, { user: userId, status: "offline" });
-            console.log(`\n${userId} saiu`);
-            client.disconnect();
-            process.exit(0);
-        });
-
-        const action = readline.question("Menu KidConnect \n1 - Solicitar Conversa\nDigite sua opcao: ");
-
-        const actionObject = {
-            1: 'request_chat'
-        };
-
-        if (actionObject[action] === 'request_chat') {
-            const username = readline.question("Informe o username do usuario: ");
-            publish(`${username}_Control`, { requesterUsername: userId, messageMode: "private" });
-        }
-    },
-    onFailure: (err) => {
-        console.error("Falha ao conectar:", err.errorMessage);
-    }
+const userInput = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
 });
 
-function publish(topic, obj) {
-    const msg = new Paho.Message(JSON.stringify(obj));
-    msg.destinationName = topic;
-    client.send(msg);
+let currentPrompt = "";
+let isWaitingInput = false;
+
+function displayMessage(message) {
+    if (isWaitingInput) {
+        readline.clearLine(process.stdout, 0);
+        readline.cursorTo(process.stdout, 0);
+
+        console.log(message);
+
+        process.stdout.write(currentPrompt);
+
+        if (userInput.line) {
+            process.stdout.write(userInput.line);
+        }
+
+        return;
+    }
+
+    console.log(message);
 }
+
+function question(prompt) {
+    currentPrompt = prompt;
+    isWaitingInput = true;
+
+    return new Promise((resolve) => {
+        userInput.question(prompt, (answer) => {
+            isWaitingInput = false;
+            currentPrompt = "";
+
+            resolve(answer);
+        });
+    });
+}
+
+async function main() {
+    const userId = await question("Digite seu ID de usuário: ");
+    const mosquitto = "ws://localhost:8083/mqtt";
+    const client = new Paho.Client(mosquitto, String(userId));
+
+    const TOPIC_USERS = "USERS";
+    const TOPIC_GROUPS = "GROUPS";
+    const ID_Control = `${userId}_Control`;
+
+    const userStatusMap = new Map();
+
+    client.onConnectionLost = () => {
+        displayMessage("Conexão perdida.");
+    };
+
+    client.onMessageArrived = (msg) => {
+        const topic = msg.destinationName;
+        const payload = msg.payloadString;
+
+        try {
+            const data = JSON.parse(payload);
+
+            if (topic === TOPIC_USERS) {
+                if (data.user && data.status) {
+                    userStatusMap.set(data.user, data.status);
+                    if (data.user !== userId) {
+                        displayMessage(`\n[ATUALIZAÇÃO] ${data.user} está ${data.status}`);
+                    }
+                }
+            }
+
+            if (topic === ID_Control) {
+                displayMessage(`\n[SOLICITAÇÃO] Mensagem recebida de ${data.requesterUsername}`);
+            }
+
+        } catch {
+            displayMessage("\n[ERRO] Mensagem inválida: " + payload);
+        }
+    };
+
+    client.connect({
+        onSuccess: async () => {
+            displayMessage(`Conectado como ${userId}`);
+            client.subscribe(TOPIC_USERS);
+            client.subscribe(ID_Control);
+
+            publish(TOPIC_USERS, { user: userId, status: "online" });
+
+            process.on("SIGINT", () => {
+                publish(TOPIC_USERS, { user: userId, status: "offline" });
+                displayMessage(`\n${userId} saiu`);
+                client.disconnect();
+                process.exit(0);
+            });
+
+            await menuLoop();
+        },
+        onFailure: (err) => {
+            console.error("Falha ao conectar:", err.errorMessage);
+        }
+    });
+
+    function publish(topic, obj) {
+        const msg = new Paho.Message(JSON.stringify(obj));
+        msg.destinationName = topic;
+        client.send(msg);
+    }
+
+    async function menuLoop() {
+        for(;ever;) {
+            console.log("\nMenu KidConnect");
+            console.log("1 - Solicitar conversa");
+            console.log("2 - Listar usuários");
+            console.log("3 - Sair\n");
+
+            const option = await question("Digite sua opção: ");
+
+            if (option === "1") {
+                const username = await question("Informe o username do usuário: ");
+                publish(`${username}_Control`, { requesterUsername: userId, messageMode: "private" });
+                displayMessage("Solicitação enviada.");
+            }
+
+            else if (option === "2") {
+                if (userStatusMap.size === 0) {
+                    displayMessage("Nenhum usuário conhecido ainda.");
+                } else {
+                    console.log("\nUsuários Conhecidos");
+                    for (const [user, status] of userStatusMap.entries()) {
+
+                        if (user !== userId) {
+                            console.log(`${user}: ${status}`);
+
+                            continue;
+                        }
+
+                        console.log("Voce: obviamente online")
+                    }
+                    console.log("\n");
+                }
+            }
+
+            else if (option === "3") {
+                publish(TOPIC_USERS, { user: userId, status: "offline" });
+                displayMessage(`${userId} saiu.`);
+                client.disconnect();
+                process.exit(0);
+            }
+
+            else {
+                displayMessage("Opção inválida.");
+            }
+        }
+    }
+}
+
+main();
