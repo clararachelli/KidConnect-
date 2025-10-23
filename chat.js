@@ -50,6 +50,7 @@ async function main() {
 
     const TOPIC_USERS = "USERS";
     const TOPIC_GROUPS = "GROUPS";
+    const TOPIC_SYNC_REQUEST = "SYNC_REQUEST";
     const ID_Control = `${userId}_Control`;
 
     const userStatusMap = new Map();
@@ -68,9 +69,11 @@ async function main() {
             if (topic === TOPIC_USERS) {
                 if (data.user && data.status) {
                     userStatusMap.set(data.user, data.status);
-                    if (data.user !== userId) {
-                        displayMessage(`\n[ATUALIZAÇÃO] ${data.user} está ${data.status}`);
-                    }
+                }
+            }
+            else if (topic === TOPIC_SYNC_REQUEST) {
+                if (data.requester && data.requester !== userId) {
+                    publish(TOPIC_USERS, { user: userId, status: "online" });
                 }
             }
 
@@ -87,9 +90,12 @@ async function main() {
         onSuccess: async () => {
             displayMessage(`Conectado como ${userId}`);
             client.subscribe(TOPIC_USERS);
+            client.subscribe(TOPIC_SYNC_REQUEST);
             client.subscribe(ID_Control);
 
             publish(TOPIC_USERS, { user: userId, status: "online" });
+
+            publish(TOPIC_SYNC_REQUEST, { requester: userId });
 
             process.on("SIGINT", () => {
                 publish(TOPIC_USERS, { user: userId, status: "offline" });
@@ -139,7 +145,7 @@ async function main() {
                             continue;
                         }
 
-                        console.log("Voce: obviamente online")
+                        console.log(`${userId}: usuario atual`)
                     }
                     console.log("\n");
                 }
