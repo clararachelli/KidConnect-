@@ -1,6 +1,7 @@
 const Paho = require("paho-mqtt");
 const readline = require("readline");
-const { readLog, writeLog } = require('./logHandler')
+const { readLog, writeLog } = require('./logHandler');
+const GroupManager = require("./GroupManager");
 const ever = true;
 
 async function displayLog() {
@@ -173,6 +174,13 @@ async function main() {
         client.send(msg);
     }
 
+    const groupManager = new GroupManager(
+        userId,
+        publish,
+        question,
+        displayMessage
+    );
+
     async function manageRequests() {
         if (conversationRequestsArray.length === 0) {
             displayMessage("\n[INFO] Nenhuma solicitação de conversa pendente.");
@@ -217,6 +225,23 @@ async function main() {
         }
     }
 
+    async function groupSubMenu() {
+        console.log("\n--- Menu de Grupos ---");
+        console.log("1 - Criar Novo Grupo");
+        console.log("2 - Listar Grupos Cadastrados");
+        console.log("V - Voltar\n");
+
+        const option = await question("Digite sua opção: ");
+
+        if (option === '1') {
+            await groupManager.createGroup();
+        } else if (option === '2') {
+            groupManager.listGroups();
+        } else if (option.toUpperCase() !== 'V') {
+            displayMessage("Opção inválida.");
+        }
+    }
+
     async function menuLoop() {
         for(;ever;) {
             console.log("\nMenu KidConnect");
@@ -224,7 +249,8 @@ async function main() {
             console.log("2 - Listar usuários");
             console.log("3 - Sair");
             console.log("4 - Gerenciar solicitações de conversa");
-            console.log("5 - Exibir log de depuração\n");
+            console.log("5 - Exibir log de depuração");
+            console.log("6 - Gerenciar Grupos\n");
 
             const option = await question("Digite sua opção: ");
 
@@ -262,6 +288,10 @@ async function main() {
 
             else if (option === "5") {
                 await displayLog();
+            }
+
+            else if (option === "6") {
+                await groupSubMenu();
             }
 
             else {
