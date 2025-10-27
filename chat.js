@@ -1,6 +1,19 @@
 const Paho = require("paho-mqtt");
 const readline = require("readline");
+const { readLog, writeLog } = require('./logHandler')
 const ever = true;
+
+async function displayLog() {
+    const logContent = readLog();
+
+    if (logContent.startsWith('[INFO]') || logContent.startsWith('[ERRO]')) {
+        displayMessage(logContent);
+    } else {
+        console.log("\n--- Conteúdo do Log de Depuração ---");
+        console.log(logContent.trim());
+        console.log("-------------------------------------\n");
+    }
+}
 
 const userInput = readline.createInterface({
     input: process.stdin,
@@ -94,6 +107,7 @@ async function main() {
             if (topic === ID_Control) {
                 if (topic === ID_Control) {
                     if (data.messageMode === 'private') {
+                        writeLog(`SOLICITACAO RECEBIDA: De ${data.sender} para ${ID_Control}`);
                         const existingRequest = conversationRequestsArray.find(req => req.sender === data.sender);
 
                         if (!existingRequest) {
@@ -110,6 +124,8 @@ async function main() {
                     }
 
                     if (data.messageMode === 'chatConfirmation') {
+                        writeLog(`SOLICITACAO CONFIRMADA: Topico gerado ${data.chatId}`);
+
                         displayMessage(`\n[INFO] Conversa iniciada com ${data.sender} no chat ${data.chatId}`);
                         client.subscribe(data.chatId);
                     }
@@ -207,7 +223,8 @@ async function main() {
             console.log("1 - Solicitar conversa");
             console.log("2 - Listar usuários");
             console.log("3 - Sair");
-            console.log("4 - Gerenciar solicitações de conversa\n");
+            console.log("4 - Gerenciar solicitações de conversa");
+            console.log("5 - Exibir log de depuração\n");
 
             const option = await question("Digite sua opção: ");
 
@@ -243,7 +260,11 @@ async function main() {
                 await manageRequests();
             }
 
-            else if (option !== "4") {
+            else if (option === "5") {
+                await displayLog();
+            }
+
+            else {
                 displayMessage("Opção inválida.");
             }
         }
