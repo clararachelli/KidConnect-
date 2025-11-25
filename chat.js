@@ -1,59 +1,69 @@
 const Paho = require("paho-mqtt");
 const readline = require("readline");
-const { readLog, writeLog } = require('./logHandler');
 const GroupManager = require("./GroupManager");
-const ever = true;
+const { readLog, writeLog } = require('./logHandler'); // Assumindo que você tem esse arquivo
 
-// Configurações Globais
+// --- Configurações ---
 const BROKER_URL = "ws://localhost:8083/mqtt";
 const TOPIC_USERS_ROOT = "USERS";
-const TOPIC_GROUPS_ROOT = "GROUPS"; // Raiz para grupos
+const TOPIC_GROUPS_ROOT = "GROUPS";
 
-// --- Interface de Linha de Comando ---
-const userInput = readline.createInterface({
+// --- Interface Global Única ---
+// Criamos apenas UMA vez para evitar conflitos de 'interface closed'
+const rl = readline.createInterface({
     input: process.stdin,
-    output: process.stdout
+    output: process.stdout,
+    prompt: ''
 });
 
-let currentPrompt = "";
-let isWaitingInput = false;
+// Variáveis de Estado
+let currentPromptStr = "";
+let activeChatId = null; // Se diferente de null, estamos no modo chat
+let isAsking = false;    // Se true, o programa está esperando uma resposta de 'question'
 
+// --- Função de Exibição Híbrida ---
+// Permite imprimir notificações sem apagar o que o usuário está digitando
 function displayMessage(message) {
-    if (isWaitingInput) {
-        readline.clearLine(process.stdout, 0);
-        readline.cursorTo(process.stdout, 0);
-        console.log(message);
-        process.stdout.write(currentPrompt);
-        if (userInput.line) {
-            process.stdout.write(userInput.line);
-        }
-        return;
-    }
+    // 1. Limpa a linha atual e move o cursor para o início
+    readline.clearLine(process.stdout, 0);
+    readline.cursorTo(process.stdout, 0);
+
+    // 2. Imprime a mensagem do sistema/chat
     console.log(message);
+
+    // 3. Redesenha o prompt e o que o usuário já tinha digitado (buffer)
+    // Isso garante a sensação de "tempo real" sem quebrar o input
+    process.stdout.write(currentPromptStr);
+    if (rl.line) {
+        process.stdout.write(rl.line);
+    }
 }
 
-function question(prompt) {
-    currentPrompt = prompt;
-    isWaitingInput = true;
+// Wrapper para fazer perguntas (Promise)
+function question(promptText) {
+    currentPromptStr = promptText;
+    isAsking = true;
+
+    // Pequeno hack: forçamos o displayMessage a não sobrescrever
+    // enquanto o readline nativo lida com o input
     return new Promise((resolve) => {
-        userInput.question(prompt, (answer) => {
-            isWaitingInput = false;
-            currentPrompt = "";
-            resolve(answer);
+        rl.question(promptText, (answer) => {
+            isAsking = false;
+            currentPromptStr = "";
+            resolve(answer.trim());
         });
     });
 }
 
-// --- Lógica Principal ---
 async function main() {
     console.clear();
     const userId = await question("Digite seu ID de usuário: ");
 
-    // Definições de Tópicos do Usuário
+    // Tópicos
     const MY_USER_TOPIC = `${TOPIC_USERS_ROOT}/${userId}`;
     const ID_Control = `${userId}_Control`;
 
-    // Last Will (Status Offline)
+    // Last Will
     const lastWill = new Paho.Message(JSON.stringify({ user: userId, status: "offline" }));
     lastWill.destinationName = MY_USER_TOPIC;
     lastWill.qos = 1;
@@ -61,11 +71,12 @@ async function main() {
 
     const client = new Paho.Client(BROKER_URL, String(userId));
 
-    // Estados Locais
+    // Dados Locais
     const userStatusMap = new Map();
     const conversationRequestsArray = [];
+    const chatHistory = new Map();
 
-    // Função de publicação (Hoisted ou definida antes de passar para GroupManager)
+    // Função Publish
     function publish(topic, obj, retain = false) {
         try {
             const msg = new Paho.Message(JSON.stringify(obj));
@@ -74,128 +85,162 @@ async function main() {
             msg.retained = retain;
             client.send(msg);
         } catch (e) {
-            displayMessage(`[ERRO] Falha ao publicar: ${e.message}`);
+            console.error(`Erro pub: ${e.message}`);
         }
     }
 
-    // Instancia o GroupManager
-    const groupManager = new GroupManager(
-        userId,
-        publish,
-        question,
-        displayMessage
-    );
+    // Instancia Gerenciador
+    const groupManager = new GroupManager(userId, publish, question, displayMessage);
 
-    client.onConnectionLost = (responseObject) => {
-        if (responseObject.errorCode !== 0) {
-            displayMessage(`[ERRO] Conexão perdida: ${responseObject.errorMessage}`);
-        }
+    // Callbacks MQTT
+    client.onConnectionLost = (resp) => {
+        if (resp.errorCode !== 0) displayMessage(`[SISTEMA] Conexão perdida: ${resp.errorMessage}`);
     };
 
-    client.onMessageArrived = async (msg) => {
+    client.onMessageArrived = (msg) => {
         const topic = msg.destinationName;
         const payload = msg.payloadString;
+        if (!payload) return;
 
         try {
-            if (!payload) return; // Ignora payload vazio (retained clean)
             const data = JSON.parse(payload);
 
-            // 1. Atualização de Usuários (USERS/+)
-            if (topic.startsWith(TOPIC_USERS_ROOT)) {
-                if (data.user && data.status) {
-                    userStatusMap.set(data.user, data.status);
+            // A. Mensagens de Chat
+            if (chatHistory.has(topic)) {
+                chatHistory.get(topic).push(data); // Salva histórico
+
+                // Se for msg de OUTRA PESSOA no chat ATUAL, exibe
+                if (activeChatId === topic && data.sender !== userId) {
+                    displayMessage(`[${data.sender}]: ${data.text}`);
+                }
+                // Se for msg de OUTRO chat, avisa
+                else if (activeChatId !== topic) {
+                    // Opcional: displayMessage(`[NOVA MSG] de ${data.sender} em outra aba.`);
                 }
             }
 
-            // 2. Atualização de Grupos (GROUPS/+) - NOVA LÓGICA
-            if (topic.startsWith(TOPIC_GROUPS_ROOT)) {
-                // Passa o objeto do grupo recebido para o gerenciador atualizar a lista local
-                groupManager.updateGroupLocalState(data);
-            }
-
-            // 3. Canal de Controle (ID_Control)
+            // B. Controle (Solicitações)
             if (topic === ID_Control) {
                 if (data.messageMode === 'private') {
-                    writeLog(`SOLICITACAO RECEBIDA: De ${data.sender}`);
-                    const existingRequest = conversationRequestsArray.find(req => req.sender === data.sender);
-
-                    if (!existingRequest) {
-                        conversationRequestsArray.push({
-                            sender: data.sender,
-                            timestamp: Date.now()
-                        });
-                        displayMessage(`\n[SOLICITAÇÃO] Nova conversa de: ${data.sender}. (Menu 3 para ver)`);
+                    // Evita duplicatas simples
+                    const exists = conversationRequestsArray.find(r => r.sender === data.sender);
+                    if (!exists) {
+                        conversationRequestsArray.push({ sender: data.sender, timestamp: Date.now() });
+                        displayMessage(`\n[SOLICITAÇÃO] ${data.sender} quer conversar. (Menu 3)`);
                     }
                 }
                 else if (data.messageMode === 'chatConfirmation') {
-                    writeLog(`CHAT INICIADO: Sala ${data.chatId}`);
-                    displayMessage(`\n[INFO] Conversa aceita por ${data.sender}. Sala: ${data.chatId}`);
-                    client.subscribe(data.chatId);
+                    if (!chatHistory.has(data.chatId)) {
+                        chatHistory.set(data.chatId, []);
+                        client.subscribe(data.chatId);
+                        displayMessage(`\n[INFO] Chat iniciado: ${data.chatId}`);
+                    }
                 }
             }
 
+            // C. Atualizações de Estado
+            if (topic.startsWith(TOPIC_USERS_ROOT) && data.user) {
+                userStatusMap.set(data.user, data.status);
+            }
+            if (topic.startsWith(TOPIC_GROUPS_ROOT)) {
+                groupManager.updateGroupLocalState(data);
+            }
+
         } catch (e) {
-            // writeLog(`[ERRO JSON] Tópico: ${topic} | ${e.message}`);
+            // Ignora JSON ruim
         }
     };
 
+    // Conexão
     client.connect({
         willMessage: lastWill,
         cleanSession: false,
         onSuccess: async () => {
-            displayMessage(`[INFO] Conectado como: ${userId}`);
+            displayMessage(`[SISTEMA] Conectado como: ${userId}`);
 
-            // Assinaturas (Wildcards para Usuários e Grupos)
             client.subscribe(`${TOPIC_USERS_ROOT}/+`);
-            client.subscribe(`${TOPIC_GROUPS_ROOT}/+`); // <-- AQUI: Ouve GROUPS/A, GROUPS/B, etc.
+            client.subscribe(`${TOPIC_GROUPS_ROOT}/+`);
             client.subscribe(ID_Control);
 
-            // Publica presença
             publish(MY_USER_TOPIC, { user: userId, status: "online" }, true);
 
-            // Handler de Saída
             process.on("SIGINT", () => {
-                displayMessage(`\n[INFO] Encerrando...`);
                 const msg = new Paho.Message(JSON.stringify({ user: userId, status: "offline" }));
                 msg.destinationName = MY_USER_TOPIC;
                 msg.qos = 1;
                 msg.retained = true;
                 client.send(msg);
-
-                setTimeout(() => {
-                    client.disconnect();
-                    process.exit(0);
-                }, 500);
+                setTimeout(() => { client.disconnect(); process.exit(0); }, 500);
             });
 
             await menuLoop();
         },
         onFailure: (err) => {
-            console.error("[CRÍTICO] Falha na conexão:", err.errorMessage);
+            console.error("Falha ao conectar:", err.errorMessage);
             process.exit(1);
         }
     });
 
-    // --- Funções Auxiliares do Menu ---
+    // --- MODO CHAT ---
+    async function enterChatMode(chatId) {
+        activeChatId = chatId;
+        console.clear();
+        console.log(`=== BATE-PAPO: ${chatId} ===`);
+        console.log("Digite sua mensagem e ENTER. Digite '/sair' para voltar.\n");
 
+        // 1. Mostra histórico
+        const history = chatHistory.get(chatId) || [];
+        history.forEach(msg => {
+            const label = (msg.sender === userId) ? "Você" : msg.sender;
+            console.log(`[${label}]: ${msg.text}`);
+        });
+
+        // 2. Loop de Input do Chat
+        // Usamos um loop while com 'question' para manter o input focado no chat
+        let inChat = true;
+        while (inChat) {
+            // O prompt muda para indicar modo chat
+            const text = await question("> ");
+
+            if (text === '/sair') {
+                inChat = false;
+                activeChatId = null;
+                console.log("Saindo do chat...");
+                break;
+            }
+
+            if (text) {
+                const msgPayload = {
+                    sender: userId,
+                    text: text,
+                    timestamp: Date.now()
+                };
+
+                // Envia
+                publish(chatId, msgPayload, false);
+
+                // Mostra localmente (feedback imediato)
+                console.log(`[Você]: ${text}`);
+                chatHistory.get(chatId).push(msgPayload);
+            }
+        }
+    }
+
+    // --- Funções Auxiliares Menu ---
     async function manageRequests() {
         if (conversationRequestsArray.length === 0) {
-            displayMessage("\n[INFO] Sem solicitações pendentes.");
+            console.log("Nenhuma solicitação pendente.");
             return;
         }
+        console.log("\n--- Solicitações ---");
+        conversationRequestsArray.forEach((req, idx) => console.log(`${idx+1}. De: ${req.sender}`));
 
-        console.log("\n--- Solicitações Pendentes ---");
-        conversationRequestsArray.forEach((req, idx) => {
-            console.log(`${idx + 1} - De: ${req.sender} (${new Date(req.timestamp).toLocaleTimeString()})`);
-        });
-        console.log("-----------------------------");
+        const sel = await question("Número para aceitar (ou V): ");
+        if (sel.toUpperCase() === 'V') return;
 
-        const selection = await question("Número para aceitar (ou 'V' para voltar): ");
-        if (selection.toUpperCase() === 'V') return;
-
-        const index = parseInt(selection) - 1;
-        if (index >= 0 && index < conversationRequestsArray.length) {
-            const req = conversationRequestsArray[index];
+        const idx = parseInt(sel) - 1;
+        if (idx >= 0 && idx < conversationRequestsArray.length) {
+            const req = conversationRequestsArray[idx];
             const chatId = `${req.sender}_${userId}_${req.timestamp}`;
 
             publish(`${req.sender}_Control`, {
@@ -204,61 +249,64 @@ async function main() {
                 chatId: chatId
             });
 
+            if (!chatHistory.has(chatId)) chatHistory.set(chatId, []);
             client.subscribe(chatId);
-            displayMessage(`\n[SUCESSO] Aceito! Sala: ${chatId}`);
-            conversationRequestsArray.splice(index, 1);
-        } else {
-            displayMessage("Opção inválida.");
+
+            console.log(`[SUCESSO] Sala criada: ${chatId}`);
+            conversationRequestsArray.splice(idx, 1);
         }
+    }
+
+    async function listActiveChats() {
+        if (chatHistory.size === 0) {
+            console.log("Nenhuma conversa ativa.");
+            return null;
+        }
+        console.log("\n--- Conversas Ativas ---");
+        const chats = Array.from(chatHistory.keys());
+        chats.forEach((c, i) => console.log(`${i+1}. ${c}`));
+
+        const sel = await question("Escolha o número (ou V): ");
+        if (sel.toUpperCase() === 'V') return null;
+
+        const idx = parseInt(sel) - 1;
+        return (idx >= 0 && idx < chats.length) ? chats[idx] : null;
     }
 
     async function groupSubMenu() {
-        console.log("\n--- Menu de Grupos ---");
-        console.log("1 - Criar Novo Grupo");
-        console.log("2 - Listar Grupos Disponíveis");
-        console.log("V - Voltar");
-
-        const option = await question("Opção: ");
-
-        if (option === '1') {
-            await groupManager.createGroup();
-        } else if (option === '2') {
-            groupManager.listGroups();
-        } else if (option.toUpperCase() !== 'V') {
-            displayMessage("Opção inválida.");
-        }
+        console.log("\n--- Grupos ---");
+        console.log("1. Criar");
+        console.log("2. Listar");
+        console.log("V. Voltar");
+        const op = await question("Opção: ");
+        if (op === '1') await groupManager.createGroup();
+        else if (op === '2') groupManager.listGroups();
     }
 
+    // --- LOOP PRINCIPAL DO MENU ---
     async function menuLoop() {
-        for(;ever;) {
+        while (true) { // Loop infinito seguro
             console.log("\n=== KIDCONNECT MQTT ===");
-            console.log("1 - Solicitar Bate-papo (Privado)");
-            console.log("2 - Ver Usuários Online");
-            console.log("3 - Gerenciar Solicitações");
-            console.log("4 - Menu de Grupos");
-            console.log("5 - Log de Depuração");
-            console.log("0 - Sair");
-            console.log("=======================");
+            console.log("1. Solicitar Bate-papo");
+            console.log("2. Usuários Online");
+            console.log("3. Solicitações Pendentes");
+            console.log("4. Grupos");
+            console.log("5. ENTRAR EM CONVERSA");
+            console.log("0. Sair");
 
             const option = await question("Opção: ");
 
             switch (option) {
                 case "1":
-                    const target = await question("ID do usuário alvo: ");
-                    if (target === userId) {
-                        displayMessage("Erro: Auto-conversa não permitida.");
-                    } else {
+                    const target = await question("ID Alvo: ");
+                    if (target !== userId) {
                         publish(`${target}_Control`, { sender: userId, messageMode: "private" });
-                        displayMessage(`Solicitação enviada para ${target}.`);
+                        console.log("Solicitação enviada.");
                     }
                     break;
                 case "2":
                     console.log("\n--- Usuários ---");
-                    if (userStatusMap.size === 0) console.log("(vazio)");
-                    for (const [u, s] of userStatusMap.entries()) {
-                        console.log(`> [${s.toUpperCase()}] ${u} ${(u===userId)?'(Você)':''}`);
-                    }
-                    console.log("----------------");
+                    for (const [u, s] of userStatusMap.entries()) console.log(`> [${s}] ${u}`);
                     break;
                 case "3":
                     await manageRequests();
@@ -267,13 +315,16 @@ async function main() {
                     await groupSubMenu();
                     break;
                 case "5":
-                    await displayLog();
+                    const chatToEnter = await listActiveChats();
+                    if (chatToEnter) {
+                        await enterChatMode(chatToEnter);
+                    }
                     break;
                 case "0":
                     process.emit("SIGINT");
-                    break;
+                    return; // Sai do loop
                 default:
-                    displayMessage("Comando desconhecido.");
+                    console.log("Opção inválida.");
             }
         }
     }
