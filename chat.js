@@ -1,51 +1,38 @@
 const Paho = require("paho-mqtt");
 const readline = require("readline");
 const GroupManager = require("./GroupManager");
-const { readLog, writeLog } = require('./logHandler'); // Assumindo que você tem esse arquivo
+const { readLog, writeLog } = require('./logHandler');
 
-// --- Configurações ---
 const BROKER_URL = "ws://localhost:8083/mqtt";
 const TOPIC_USERS_ROOT = "USERS";
 const TOPIC_GROUPS_ROOT = "GROUPS";
 
-// --- Interface Global Única ---
-// Criamos apenas UMA vez para evitar conflitos de 'interface closed'
 const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
     prompt: ''
 });
 
-// Variáveis de Estado
 let currentPromptStr = "";
-let activeChatId = null; // Se diferente de null, estamos no modo chat
-let isAsking = false;    // Se true, o programa está esperando uma resposta de 'question'
+let activeChatId = null;
+let isAsking = false;
 
-// --- Função de Exibição Híbrida ---
-// Permite imprimir notificações sem apagar o que o usuário está digitando
 function displayMessage(message) {
-    // 1. Limpa a linha atual e move o cursor para o início
     readline.clearLine(process.stdout, 0);
     readline.cursorTo(process.stdout, 0);
 
-    // 2. Imprime a mensagem do sistema/chat
     console.log(message);
 
-    // 3. Redesenha o prompt e o que o usuário já tinha digitado (buffer)
-    // Isso garante a sensação de "tempo real" sem quebrar o input
     process.stdout.write(currentPromptStr);
     if (rl.line) {
         process.stdout.write(rl.line);
     }
 }
 
-// Wrapper para fazer perguntas (Promise)
 function question(promptText) {
     currentPromptStr = promptText;
     isAsking = true;
 
-    // Pequeno hack: forçamos o displayMessage a não sobrescrever
-    // enquanto o readline nativo lida com o input
     return new Promise((resolve) => {
         rl.question(promptText, (answer) => {
             isAsking = false;
@@ -59,24 +46,20 @@ async function main() {
     console.clear();
     const userId = await question("Digite seu ID de usuário: ");
 
-    // Tópicos
     const MY_USER_TOPIC = `${TOPIC_USERS_ROOT}/${userId}`;
     const ID_Control = `${userId}_Control`;
 
-    // Last Will
     const lastWill = new Paho.Message(JSON.stringify({ user: userId, status: "offline" }));
     lastWill.destinationName = MY_USER_TOPIC;
     lastWill.qos = 1;
     lastWill.retained = true;
 
     const client = new Paho.Client(BROKER_URL, String(userId));
-
-    // Dados Locais
     const userStatusMap = new Map();
-    const conversationRequestsArray = [];
+
+    const requestsArray = [];
     const chatHistory = new Map();
 
-    // Função Publish
     function publish(topic, obj, retain = false) {
         try {
             const msg = new Paho.Message(JSON.stringify(obj));
@@ -84,15 +67,11 @@ async function main() {
             msg.qos = 1;
             msg.retained = retain;
             client.send(msg);
-        } catch (e) {
-            console.error(`Erro pub: ${e.message}`);
-        }
+        } catch (e) { console.error(e); }
     }
 
-    // Instancia Gerenciador
     const groupManager = new GroupManager(userId, publish, question, displayMessage);
 
-    // Callbacks MQTT
     client.onConnectionLost = (resp) => {
         if (resp.errorCode !== 0) displayMessage(`[SISTEMA] Conexão perdida: ${resp.errorMessage}`);
     };
@@ -105,28 +84,18 @@ async function main() {
         try {
             const data = JSON.parse(payload);
 
-            // A. Mensagens de Chat
             if (chatHistory.has(topic)) {
-                chatHistory.get(topic).push(data); // Salva histórico
-
-                // Se for msg de OUTRA PESSOA no chat ATUAL, exibe
+                chatHistory.get(topic).push(data);
                 if (activeChatId === topic && data.sender !== userId) {
                     displayMessage(`[${data.sender}]: ${data.text}`);
                 }
-                // Se for msg de OUTRO chat, avisa
-                else if (activeChatId !== topic) {
-                    // Opcional: displayMessage(`[NOVA MSG] de ${data.sender} em outra aba.`);
-                }
             }
 
-            // B. Controle (Solicitações)
             if (topic === ID_Control) {
                 if (data.messageMode === 'private') {
-                    // Evita duplicatas simples
-                    const exists = conversationRequestsArray.find(r => r.sender === data.sender);
-                    if (!exists) {
-                        conversationRequestsArray.push({ sender: data.sender, timestamp: Date.now() });
-                        displayMessage(`\n[SOLICITAÇÃO] ${data.sender} quer conversar. (Menu 3)`);
+                    if (!requestsArray.find((request) => request.sender === data.sender && request.type === 'private')) {
+                        requestsArray.push({ type: 'private', sender: data.sender, timestamp: Date.now() });
+                        displayMessage(`\n[SOLICITAÇÃO] ${data.sender} quer conversar.`);
                     }
                 }
                 else if (data.messageMode === 'chatConfirmation') {
@@ -136,33 +105,51 @@ async function main() {
                         displayMessage(`\n[INFO] Chat iniciado: ${data.chatId}`);
                     }
                 }
+                else if (data.messageMode === 'groupJoinRequest') {
+                    requestsArray.push({
+                        type: 'group',
+                        sender: data.sender,
+                        groupName: data.groupName,
+                        timestamp: Date.now()
+                    });
+                    displayMessage(`\n[SOLICITAÇÃO] ${data.sender} quer entrar no grupo '${data.groupName}'.`);
+                }
             }
 
-            // C. Atualizações de Estado
-            if (topic.startsWith(TOPIC_USERS_ROOT) && data.user) {
-                userStatusMap.set(data.user, data.status);
-            }
+            if (topic.startsWith(TOPIC_USERS_ROOT) && data.user) userStatusMap.set(data.user, data.status);
+
             if (topic.startsWith(TOPIC_GROUPS_ROOT)) {
                 groupManager.updateGroupLocalState(data);
+
+                if (data.members?.includes(userId)) {
+                    const groupChatTopic = `GROUP_CHAT/${data.groupName}`;
+                    if (!chatHistory.has(groupChatTopic)) {
+                        chatHistory.set(groupChatTopic, []);
+                        client.subscribe(groupChatTopic);
+                    }
+                }
             }
 
-        } catch (e) {
-            // Ignora JSON ruim
-        }
+        } catch (e) {}
     };
 
-    // Conexão
     client.connect({
         willMessage: lastWill,
         cleanSession: false,
         onSuccess: async () => {
             displayMessage(`[SISTEMA] Conectado como: ${userId}`);
-
             client.subscribe(`${TOPIC_USERS_ROOT}/+`);
             client.subscribe(`${TOPIC_GROUPS_ROOT}/+`);
             client.subscribe(ID_Control);
-
             publish(MY_USER_TOPIC, { user: userId, status: "online" }, true);
+
+            groupManager.groupsMap.forEach(group => {
+                if(group.members.includes(userId)) {
+                    const topic = `GROUP_CHAT/${group.groupName}`;
+                    if(!chatHistory.has(topic)) chatHistory.set(topic, []);
+                    client.subscribe(topic);
+                }
+            });
 
             process.on("SIGINT", () => {
                 const msg = new Paho.Message(JSON.stringify({ user: userId, status: "offline" }));
@@ -175,85 +162,84 @@ async function main() {
 
             await menuLoop();
         },
-        onFailure: (err) => {
-            console.error("Falha ao conectar:", err.errorMessage);
-            process.exit(1);
-        }
+        onFailure: (err) => { console.error("Falha ao conectar:", err.errorMessage); process.exit(1); }
     });
 
-    // --- MODO CHAT ---
     async function enterChatMode(chatId) {
         activeChatId = chatId;
         console.clear();
-        console.log(`=== BATE-PAPO: ${chatId} ===`);
-        console.log("Digite sua mensagem e ENTER. Digite '/sair' para voltar.\n");
 
-        // 1. Mostra histórico
+        let chatName = chatId;
+
+        if (chatId.startsWith(TOPIC_GROUPS_ROOT)) {
+            chatName = chatId.split('/')[1];
+        }
+        else {
+            const splitChatId = chatId.split('_');
+
+            chatName = splitChatId[0] === userId ? splitChatId[1] : splitChatId[0];
+        }
+
+        console.log(`=== CHAT: ${chatName} ===`);
+        console.log("Digite '/sair' para voltar.\n");
+
         const history = chatHistory.get(chatId) || [];
         history.forEach(msg => {
             const label = (msg.sender === userId) ? "Você" : msg.sender;
             console.log(`[${label}]: ${msg.text}`);
         });
 
-        // 2. Loop de Input do Chat
-        // Usamos um loop while com 'question' para manter o input focado no chat
         let inChat = true;
         while (inChat) {
-            // O prompt muda para indicar modo chat
             const text = await question("> ");
-
             if (text === '/sair') {
                 inChat = false;
                 activeChatId = null;
-                console.log("Saindo do chat...");
+                console.log("Saindo...");
                 break;
             }
-
             if (text) {
-                const msgPayload = {
-                    sender: userId,
-                    text: text,
-                    timestamp: Date.now()
-                };
-
-                // Envia
+                const msgPayload = { sender: userId, text: text, timestamp: Date.now() };
                 publish(chatId, msgPayload, false);
-
-                // Mostra localmente (feedback imediato)
                 console.log(`[Você]: ${text}`);
                 chatHistory.get(chatId).push(msgPayload);
             }
         }
     }
 
-    // --- Funções Auxiliares Menu ---
     async function manageRequests() {
-        if (conversationRequestsArray.length === 0) {
+        if (requestsArray.length === 0) {
             console.log("Nenhuma solicitação pendente.");
             return;
         }
         console.log("\n--- Solicitações ---");
-        conversationRequestsArray.forEach((req, idx) => console.log(`${idx+1}. De: ${req.sender}`));
+        requestsArray.forEach((req, idx) => {
+            if (req.type === 'private') {
+                console.log(`${idx+1}. [PRIVADO] De: ${req.sender}`);
+            } else {
+                console.log(`${idx+1}. [GRUPO] De: ${req.sender} para entrar em '${req.groupName}'`);
+            }
+        });
 
         const sel = await question("Número para aceitar (ou V): ");
         if (sel.toUpperCase() === 'V') return;
 
         const idx = parseInt(sel) - 1;
-        if (idx >= 0 && idx < conversationRequestsArray.length) {
-            const req = conversationRequestsArray[idx];
-            const chatId = `${req.sender}_${userId}_${req.timestamp}`;
+        if (idx >= 0 && idx < requestsArray.length) {
+            const req = requestsArray[idx];
 
-            publish(`${req.sender}_Control`, {
-                sender: userId,
-                messageMode: 'chatConfirmation',
-                chatId: chatId
-            });
+            if (req.type === 'private') {
+                const chatId = `${req.sender}_${userId}_${req.timestamp}`;
+                publish(`${req.sender}_Control`, { sender: userId, messageMode: 'chatConfirmation', chatId: chatId });
+                if (!chatHistory.has(chatId)) chatHistory.set(chatId, []);
+                client.subscribe(chatId);
+                console.log(`[SUCESSO] Chat Privado criado: ${chatId}`);
+            }
+            else if (req.type === 'group') {
+                groupManager.addMemberToGroup(req.groupName, req.sender);
+            }
 
-            if (!chatHistory.has(chatId)) chatHistory.set(chatId, []);
-            client.subscribe(chatId);
-
-            console.log(`[SUCESSO] Sala criada: ${chatId}`);
-            conversationRequestsArray.splice(idx, 1);
+            requestsArray.splice(idx, 1);
         }
     }
 
@@ -262,36 +248,36 @@ async function main() {
             console.log("Nenhuma conversa ativa.");
             return null;
         }
-        console.log("\n--- Conversas Ativas ---");
+        console.log("\n--- Conversas Ativas (Privadas e Grupos) ---");
         const chats = Array.from(chatHistory.keys());
-        chats.forEach((c, i) => console.log(`${i+1}. ${c}`));
 
-        const sel = await question("Escolha o número (ou V): ");
-        if (sel.toUpperCase() === 'V') return null;
+        chats.forEach((chat, index) => {
+            let displayName;
+            if (chat.startsWith("GROUP_CHAT/")) {
+                displayName = `[GRUPO] ${chat.replace("GROUP_CHAT/", "")}`;
+            }
+            else {
+                const splitChatId = chat.split("_");
+                displayName = `[PRIVADO] ${splitChatId[0] === userId ? splitChatId[1] : splitChatId[0]}`;
+            }
 
-        const idx = parseInt(sel) - 1;
-        return (idx >= 0 && idx < chats.length) ? chats[idx] : null;
+            console.log(`${index + 1}. ${displayName}`);
+        });
+
+        const chat = await question("Escolha o número (ou V): ");
+        if (chat.toUpperCase() === 'V') return null;
+        const chatIndex = parseInt(chat) - 1;
+        return (chatIndex >= 0 && chatIndex < chats.length) ? chats[chatIndex] : null;
     }
 
-    async function groupSubMenu() {
-        console.log("\n--- Grupos ---");
-        console.log("1. Criar");
-        console.log("2. Listar");
-        console.log("V. Voltar");
-        const op = await question("Opção: ");
-        if (op === '1') await groupManager.createGroup();
-        else if (op === '2') groupManager.listGroups();
-    }
-
-    // --- LOOP PRINCIPAL DO MENU ---
     async function menuLoop() {
-        while (true) { // Loop infinito seguro
+        while (true) {
             console.log("\n=== KIDCONNECT MQTT ===");
-            console.log("1. Solicitar Bate-papo");
+            console.log("1. Solicitar Bate-papo Privado");
             console.log("2. Usuários Online");
-            console.log("3. Solicitações Pendentes");
-            console.log("4. Grupos");
-            console.log("5. ENTRAR EM CONVERSA");
+            console.log("3. Solicitações Pendentes (Priv/Grupo)");
+            console.log("4. Grupos (Listar / Criar / Entrar)");
+            console.log("5. ENTRAR EM CONVERSA (Chat)");
             console.log("0. Sair");
 
             const option = await question("Opção: ");
@@ -315,18 +301,25 @@ async function main() {
                     await groupSubMenu();
                     break;
                 case "5":
-                    const chatToEnter = await listActiveChats();
-                    if (chatToEnter) {
-                        await enterChatMode(chatToEnter);
-                    }
+                    const chat = await listActiveChats();
+                    if (chat) await enterChatMode(chat);
                     break;
                 case "0":
                     process.emit("SIGINT");
-                    return; // Sai do loop
-                default:
-                    console.log("Opção inválida.");
+                    return;
+                default: console.log("Opção inválida.");
             }
         }
+    }
+
+    async function groupSubMenu() {
+        console.log("\n--- Menu Grupos ---");
+        console.log("1. Criar Grupo");
+        console.log("2. Listar / Solicitar Entrada");
+        console.log("V. Voltar");
+        const op = await question("Opção: ");
+        if (op === '1') await groupManager.createGroup();
+        else if (op === '2') await groupManager.listGroups(); // Note o await aqui
     }
 }
 
