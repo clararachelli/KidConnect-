@@ -93,12 +93,16 @@ async function main() {
 
             if (topic === ID_Control) {
                 if (data.messageMode === 'private') {
+                    writeLog(`Solicitacao de privado recebida: ${data.sender}`);
+
                     if (!requestsArray.find((request) => request.sender === data.sender && request.type === 'private')) {
                         requestsArray.push({ type: 'private', sender: data.sender, timestamp: Date.now() });
                         displayMessage(`\n[SOLICITAÇÃO] ${data.sender} quer conversar.`);
                     }
                 }
                 else if (data.messageMode === 'chatConfirmation') {
+                    writeLog(`Solicitacao aceita por: ${data.sender}. Tópico: ${data.chatId}`);
+
                     if (!chatHistory.has(data.chatId)) {
                         chatHistory.set(data.chatId, []);
                         client.subscribe(data.chatId);
@@ -106,6 +110,8 @@ async function main() {
                     }
                 }
                 else if (data.messageMode === 'groupJoinRequest') {
+                    writeLog(`Solicitacao de grupo recebida de: ${data.sender} para entrar em: ${data.groupName}`);
+
                     requestsArray.push({
                         type: 'group',
                         sender: data.sender,
@@ -270,14 +276,23 @@ async function main() {
         return (chatIndex >= 0 && chatIndex < chats.length) ? chats[chatIndex] : null;
     }
 
+    async function showLogs() {
+        console.log("\n--- Logs do Sistema ---");
+        const content = readLog();
+        console.log(content ? content : "nehnhum log encontrado");
+        console.log("---------------------------------------------");
+        await question("Pressione ENTER para voltar...");
+    }
+
     async function menuLoop() {
         while (true) {
             console.log("\n=== KIDCONNECT MQTT ===");
-            console.log("1. Solicitar Bate-papo Privado");
-            console.log("2. Usuários Online");
-            console.log("3. Solicitações Pendentes (Priv/Grupo)");
+            console.log("1. Enviar solicitacao de conversa");
+            console.log("2. Listar usuarios");
+            console.log("3. Solicitações Pendentes (Privadas e Grupos)");
             console.log("4. Grupos (Listar / Criar / Entrar)");
             console.log("5. ENTRAR EM CONVERSA (Chat)");
+            console.log("6. Exibir Logs (Depuração)");
             console.log("0. Sair");
 
             const option = await question("Opção: ");
@@ -304,6 +319,9 @@ async function main() {
                     const chat = await listActiveChats();
                     if (chat) await enterChatMode(chat);
                     break;
+                case "6":
+                    await showLogs();
+                    break;
                 case "0":
                     process.emit("SIGINT");
                     return;
@@ -319,7 +337,7 @@ async function main() {
         console.log("V. Voltar");
         const op = await question("Opção: ");
         if (op === '1') await groupManager.createGroup();
-        else if (op === '2') await groupManager.listGroups(); // Note o await aqui
+        else if (op === '2') await groupManager.listGroups();
     }
 }
 
