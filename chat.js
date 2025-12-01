@@ -175,9 +175,9 @@ async function main() {
         activeChatId = chatId;
         console.clear();
 
-        let chatName = chatId;
+        let chatName;
 
-        if (chatId.startsWith(TOPIC_GROUPS_ROOT)) {
+        if (chatId.startsWith('GROUP_CHAT')) {
             chatName = chatId.split('/')[1];
         }
         else {
@@ -218,7 +218,7 @@ async function main() {
             console.log("Nenhuma solicitação pendente.");
             return;
         }
-        console.log("\n--- Solicitações ---");
+        console.log("\n=== Solicitações ===");
         requestsArray.forEach((req, idx) => {
             if (req.type === 'private') {
                 console.log(`${idx+1}. [PRIVADO] De: ${req.sender}`);
@@ -236,7 +236,7 @@ async function main() {
 
             if (req.type === 'private') {
                 const chatId = `${req.sender}_${userId}_${req.timestamp}`;
-                publish(`${req.sender}_Control`, { sender: userId, messageMode: 'chatConfirmation', chatId: chatId });
+                publish(`${req.sender}_Control`, { sender: userId, messageMode: 'chatConfirmation', chatId });
                 if (!chatHistory.has(chatId)) chatHistory.set(chatId, []);
                 client.subscribe(chatId);
                 console.log(`[SUCESSO] Chat Privado criado: ${chatId}`);
@@ -254,7 +254,7 @@ async function main() {
             console.log("Nenhuma conversa ativa.");
             return null;
         }
-        console.log("\n--- Conversas Ativas (Privadas e Grupos) ---");
+        console.log("\n=== Conversas Ativas (Privadas e Grupos) ===");
         const chats = Array.from(chatHistory.keys());
 
         chats.forEach((chat, index) => {
@@ -277,7 +277,7 @@ async function main() {
     }
 
     async function showLogs() {
-        console.log("\n--- Logs do Sistema ---");
+        console.log("\n=== Logs do Sistema ===");
         const content = readLog();
         console.log(content ? content : "nehnhum log encontrado");
         console.log("---------------------------------------------");
@@ -306,7 +306,7 @@ async function main() {
                     }
                     break;
                 case "2":
-                    console.log("\n--- Usuários ---");
+                    console.log("\n=== Usuários ===");
                     for (const [u, s] of userStatusMap.entries()) console.log(`> [${s}] ${u}`);
                     break;
                 case "3":
@@ -331,7 +331,7 @@ async function main() {
     }
 
     async function groupSubMenu() {
-        console.log("\n--- Menu Grupos ---");
+        console.log("\n=== Menu Grupos ===");
         console.log("1. Criar Grupo");
         console.log("2. Listar / Solicitar Entrada");
         console.log("V. Voltar");
